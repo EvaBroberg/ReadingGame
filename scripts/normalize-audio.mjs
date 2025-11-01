@@ -24,12 +24,23 @@ const projectRoot = join(__dirname, '..');
 const audioDir = join(projectRoot, 'public', 'audio');
 const manifestPath = join(audioDir, '.normalize-manifest.json');
 
-// Target loudness: -14 LUFS, true peak ≤ -1.5 dBTP, LRA ≈ 11
-const TARGET_IL = -14.0;
+// Target loudness settings
+const TARGET_IL_LETTERS = -12.0;  // Louder for letter sounds (A-Z)
+const TARGET_IL_DEFAULT = -14.0;   // Standard for sound effects and other audio
 const TARGET_TP = -1.5;
 const TARGET_LRA = 11.0;
 const TOLERANCE_LU = 0.5; // Skip if within ±0.5 LU of target
 const MAX_CONCURRENT = 4;
+
+// Determine target loudness based on file path
+function getTargetIL(filePath) {
+  const fileName = basename(filePath, extname(filePath)).toUpperCase();
+  // Check if it's a single letter (A-Z)
+  if (/^[A-Z]$/.test(fileName)) {
+    return TARGET_IL_LETTERS;
+  }
+  return TARGET_IL_DEFAULT;
+}
 
 // Colors for terminal output
 const colors = {
@@ -127,12 +138,12 @@ async function getFileHash(filePath) {
   }
 }
 
-async function measureLoudness(filePath) {
+async function measureLoudness(filePath, targetIL = TARGET_IL_DEFAULT) {
   return new Promise((resolve, reject) => {
     const cmd = [
       'ffmpeg',
       '-i', filePath,
-      '-af', `loudnorm=I=${TARGET_IL}:TP=${TARGET_TP}:LRA=${TARGET_LRA}:print_format=json`,
+      '-af', `loudnorm=I=${targetIL}:TP=${TARGET_TP}:LRA=${TARGET_LRA}:print_format=json`,
       '-f', 'null',
       '-'
     ];
@@ -194,20 +205,21 @@ async function normalizeFile(filePath, dryRun = false) {
   const relPath = relative(audioDir, filePath);
   const ext = extname(filePath);
   const isM4a = ext === '.m4a';
+  const targetIL = getTargetIL(filePath);
   
   try {
     // Measure current loudness
-    const measured = await measureLoudness(filePath);
+    const measured = await measureLoudness(filePath, targetIL);
     const inputIL = parseFloat(measured.input_i);
     const inputTP = parseFloat(measured.input_tp);
     const inputLRA = parseFloat(measured.input_lra);
     const inputThresh = parseFloat(measured.input_thresh);
     
     // Calculate gain (estimated)
-    const gain = TARGET_IL - inputIL;
+    const gain = targetIL - inputIL;
     
     // Check if already normalized
-    if (Math.abs(inputIL - TARGET_IL) <= TOLERANCE_LU) {
+    if (Math.abs(inputIL - targetIL) <= TOLERANCE_LU) {
       return {
         file: relPath,
         skipped: true,
@@ -227,7 +239,7 @@ async function normalizeFile(filePath, dryRun = false) {
         inputIL,
         inputTP,
         gain,
-        outputIL: TARGET_IL,
+        outputIL: targetIL,
         outputTP: TARGET_TP,
       };
     }
@@ -238,7 +250,7 @@ async function normalizeFile(filePath, dryRun = false) {
     // First pass: measure with linear=true
     const measureArgs = [
       '-i', filePath,
-      '-af', `loudnorm=I=${TARGET_IL}:TP=${TARGET_TP}:LRA=${TARGET_LRA}:linear=true:print_format=json`,
+      '-af', `loudnorm=I=${targetIL}:TP=${TARGET_TP}:LRA=${TARGET_LRA}:linear=true:print_format=json`,
       '-f', 'null', '-'
     ];
     
@@ -255,7 +267,7 @@ async function normalizeFile(filePath, dryRun = false) {
     
     const applyArgs = [
       '-i', filePath,
-      '-af', `loudnorm=I=${TARGET_IL}:TP=${TARGET_TP}:LRA=${TARGET_LRA}:linear=true:measured_I=${measureData.input_i}:measured_LRA=${measureData.input_lra}:measured_TP=${measureData.input_tp}:measured_thresh=${measureData.input_thresh}:offset=${measureData.target_offset}`,
+      '-af', `loudnorm=I=${targetIL}:TP=${TARGET_TP}:LRA=${TARGET_LRA}:linear=true:measured_I=${measureData.input_i}:measured_LRA=${measureData.input_lra}:measured_TP=${measureData.input_tp}:measured_thresh=${measureData.input_thresh}:offset=${measureData.target_offset}`,
       '-c:a', codec,
       ...codecArgs,
       '-y', tempPath
@@ -264,7 +276,7 @@ async function normalizeFile(filePath, dryRun = false) {
     await runFfmpeg(applyArgs);
     
     // Verify output
-    const outputMeasured = await measureLoudness(tempPath);
+    const outputMeasured = await measureLoudness(tempPath, targetIL);
     const outputIL = parseFloat(outputMeasured.input_i);
     const outputTP = parseFloat(outputMeasured.input_tp);
     const appliedGain = parseFloat(measureData.target_offset);
@@ -324,8 +336,9 @@ async function processFiles(files, dryRun = false) {
     const relPath = relative(audioDir, file);
     const hash = await getFileHash(file);
     const entry = manifest.files[relPath];
+    const targetIL = getTargetIL(file);
     
-    if (entry && entry.hash === hash && Math.abs(entry.lufs - TARGET_IL) <= TOLERANCE_LU) {
+    if (entry && entry.hash === hash && Math.abs(entry.lufs - targetIL) <= TOLERANCE_LU) {
       continue; // Skip already normalized
     }
     
@@ -436,7 +449,8 @@ Usage:
   npm run audio:restore            Restore latest backup
 
 Target loudness:
-  Integrated LUFS: ${TARGET_IL} LUFS
+  Letter sounds (A-Z): ${TARGET_IL_LETTERS} LUFS (louder)
+  Other audio (words, effects): ${TARGET_IL_DEFAULT} LUFS
   True Peak: ≤ ${TARGET_TP} dBTP
   LRA: ≈ ${TARGET_LRA} LU
 
