@@ -178,14 +178,21 @@ export default function WordsGame() {
     if (!expected) return;
 
     const currentPhase = phaseRef.current;
+    
+    // Only process during phases that accept input
+    if (currentPhase.type !== "click_letter" && currentPhase.type !== "type_prefix") {
+      return;
+    }
 
     // Strategy 1: Find earliest matching key in buffer (allows out-of-order input)
     const buffer = keyBufferRef.current;
     
+    let processed = false;
     for (let i = 0; i < buffer.length; i++) {
       if (buffer[i].key === expected) {
         // Found matching key - consume it
         buffer.splice(i, 1);
+        processed = true;
 
         // Immediately advance state based on current phase
         if (currentPhase.type === "click_letter") {
@@ -194,28 +201,26 @@ export default function WordsGame() {
           handleCorrectType(expected);
         }
 
-        // Continue processing buffer (recursive call)
-        // This allows rapid typing: d,o,g all processed immediately
-        processBuffer();
+        // Break and let state updates trigger another processBuffer call
         break;
       }
     }
 
-    // For wrong keys during click_letter or type_prefix: play wrong sound but don't consume from buffer
-    // (Strategy 1: defer wrong keys that might become correct later)
-    // Note: We don't actively check for wrong keys here - they just stay in buffer
+    // If we processed a key, the state will change and trigger buffer processing again
+    // This allows rapid typing: d,o,g all processed in sequence
   }
 
   // Advance to next state immediately (no delay)
   function advanceToNextPhase() {
-    if (phase.type === "click_letter") {
-      if (phase.clickIndex === 0) {
+    const currentPhase = phaseRef.current;
+    if (currentPhase.type === "click_letter") {
+      if (currentPhase.clickIndex === 0) {
         setPhase({ type: "click_letter", clickIndex: 1 });
         setTypedBuffer("");
-      } else if (phase.clickIndex === 1) {
+      } else if (currentPhase.clickIndex === 1) {
         setPhase({ type: "blend_prefix", k: 2 });
         setTypedBuffer("");
-      } else if (phase.clickIndex === 2) {
+      } else if (currentPhase.clickIndex === 2) {
         setPhase({ type: "blend_prefix", k: 3 });
         setTypedBuffer("");
       }
@@ -314,6 +319,10 @@ export default function WordsGame() {
           if (phase.k !== 3) {
             setShowImage(false);
           }
+          // Explicitly process buffer after transition to typing phase
+          setTimeout(() => {
+            processBuffer();
+          }, 50);
         }, 100);
       }, phase.k * 1000);
       blendTimeoutsRef.current.push(redTimeoutId);
@@ -327,13 +336,14 @@ export default function WordsGame() {
   // Process buffer when state changes (allows queued keys to be consumed)
   useEffect(() => {
     // Process buffer after state settles (use setTimeout to avoid render cycle issues)
+    // Only trigger on phase or typingCurrentIndex changes (not on typedBuffer to avoid loops)
     const timer = setTimeout(() => {
       processBuffer();
     }, 0);
     return () => clearTimeout(timer);
-  }, [phase, typingCurrentIndex, word, letters, typedBuffer]);
+  }, [phase, typingCurrentIndex, word]);
 
-  // Physical keyboard handler - adds to buffer, processes immediately
+  // Physical keyboard handler - adds to buffer, processes immediately when appropriate
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const ch = e.key.toUpperCase();
@@ -341,9 +351,13 @@ export default function WordsGame() {
       e.preventDefault();
       e.stopPropagation();
 
-      // Only accept input during click_letter or type_prefix phases
-      // Use ref to get latest phase (avoids stale closure)
-      if (phaseRef.current.type === "blend_prefix") return;
+      const currentPhase = phaseRef.current;
+      
+      // During blend_prefix, still buffer keys but don't process (they'll be processed after transition)
+      if (currentPhase.type === "blend_prefix") {
+        addToBuffer(ch);
+        return;
+      }
 
       const expected = getExpectedLetter();
       
