@@ -66,6 +66,12 @@ export function preloadLetterSounds() {
   didPreload = true;
 }
 
+// Volume settings for balance adjustment
+const VOLUMES = {
+  letter: 1.0,      // Letters at full volume
+  feedback: 0.8,   // SFX slightly quieter to not overpower
+};
+
 export function playLetterSound(letter: string): Promise<void> {
   const L = letter.toUpperCase();
   const el = cache[L];
@@ -73,6 +79,7 @@ export function playLetterSound(letter: string): Promise<void> {
     if (el) {
       try {
         el.currentTime = 0;
+        el.volume = VOLUMES.letter;
         el.onended = () => resolve();
         void el.play().catch(() => { ttsLetter(L); resolve(); });
       } catch {
@@ -89,8 +96,8 @@ export function playFeedback(kind: "success" | "failure") {
   if (!el) return;
   try {
     el.currentTime = 0;
+    el.volume = VOLUMES.feedback;
     void el.play();
   } catch {}
 }
-// src/engine/speech.ts
 

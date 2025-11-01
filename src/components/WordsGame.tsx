@@ -18,6 +18,8 @@ function playClip(base: string): Promise<void> {
 
 // Play sound effect (correct/wrong) with m4a → mp3 fallback
 // Throttles to prevent overlapping by restarting if already playing
+const SOUND_EFFECT_VOLUME = 0.8; // SFX slightly quieter to not overpower letters
+
 let currentCorrectAudio: HTMLAudioElement | null = null;
 let currentWrongAudio: HTMLAudioElement | null = null;
 
@@ -25,6 +27,7 @@ function playSoundEffect(kind: "correct" | "wrong"): void {
   const current = kind === "correct" ? currentCorrectAudio : currentWrongAudio;
   if (current) {
     current.currentTime = 0;
+    current.volume = SOUND_EFFECT_VOLUME;
     current.play().catch(() => {});
     return;
   }
@@ -33,6 +36,7 @@ function playSoundEffect(kind: "correct" | "wrong"): void {
     if (exts.length === 0) return;
     const [ext, ...rest] = exts;
     const el = new Audio(`/audio/sound_effects/${kind}.${ext}`);
+    el.volume = SOUND_EFFECT_VOLUME;
     el.onerror = () => tryExt(rest);
     el.play().catch(() => tryExt(rest));
     
