@@ -61,6 +61,17 @@ const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
 type Word = "DOG" | "CAT";
 const WORDS: Word[] = ["DOG", "CAT"];
 
+// Type-ahead buffer configuration
+const BUFFER_MAX = 16;
+const BUFFER_ITEM_TTL_MS = 3000;
+const KEY_REPEAT_GUARD_MS = 30;
+
+// Key event stored in buffer
+interface KeyEvent {
+  key: string;
+  t: number; // timestamp
+}
+
 // State machine phases
 type Phase =
   | { type: "click_letter"; clickIndex: 0 | 1 | 2 }
@@ -79,16 +90,187 @@ export default function WordsGame() {
   const [announcement, setAnnouncement] = useState<string>("");
   const [showImage, setShowImage] = useState<boolean>(false);
 
+  // Type-ahead buffer (ring buffer with TTL)
+  const keyBufferRef = useRef<KeyEvent[]>([]);
+  const lastKeyRef = useRef<{ key: string; t: number } | null>(null);
+
+  // Refs to track latest state for buffer processing (avoids stale closures)
+  const phaseRef = useRef(phase);
+  const typingCurrentIndexRef = useRef(typingCurrentIndex);
+  const typedBufferRef = useRef(typedBuffer);
+  const lettersRef = useRef(letters);
+
   // Timeout refs for blend animation
   const blendTimeoutsRef = useRef<number[]>([]);
 
   // Prevent duplicate auto plays
   const lastAutoRef = useRef<string>("");
 
+  // Keep refs in sync with state
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
+  useEffect(() => {
+    typingCurrentIndexRef.current = typingCurrentIndex;
+  }, [typingCurrentIndex]);
+  useEffect(() => {
+    typedBufferRef.current = typedBuffer;
+  }, [typedBuffer]);
+  useEffect(() => {
+    lettersRef.current = letters;
+  }, [letters]);
+
   // Clear all blend timeouts
   function clearBlendTimeouts() {
     blendTimeoutsRef.current.forEach((id) => window.clearTimeout(id));
     blendTimeoutsRef.current = [];
+  }
+
+  // Prune buffer: remove items older than TTL
+  function pruneBuffer() {
+    const now = Date.now();
+    keyBufferRef.current = keyBufferRef.current.filter(
+      (ev) => now - ev.t < BUFFER_ITEM_TTL_MS
+    );
+  }
+
+  // Add key to buffer (ring buffer, drops oldest if at capacity)
+  function addToBuffer(key: string) {
+    const now = Date.now();
+    pruneBuffer();
+
+    // Key repeat guard: ignore repeats within 30ms for the same letter
+    if (
+      lastKeyRef.current &&
+      lastKeyRef.current.key === key &&
+      now - lastKeyRef.current.t < KEY_REPEAT_GUARD_MS
+    ) {
+      return;
+    }
+
+    lastKeyRef.current = { key, t: now };
+
+    // Ring buffer: drop oldest if at capacity
+    if (keyBufferRef.current.length >= BUFFER_MAX) {
+      keyBufferRef.current.shift();
+    }
+
+    keyBufferRef.current.push({ key, t: now });
+  }
+
+  // Get expected letter for current state (uses latest refs)
+  function getExpectedLetter(): string | null {
+    const currentPhase = phaseRef.current;
+    const currentLetters = lettersRef.current;
+    if (currentPhase.type === "click_letter") {
+      return currentLetters[currentPhase.clickIndex];
+    } else if (currentPhase.type === "type_prefix") {
+      const target = currentLetters.slice(0, currentPhase.k).join("");
+      return target[typingCurrentIndexRef.current] || null;
+    }
+    return null;
+  }
+
+  // Process buffer: consume correct keys immediately, defer out-of-order keys (Strategy 1)
+  function processBuffer() {
+    pruneBuffer();
+    const expected = getExpectedLetter();
+    if (!expected) return;
+
+    const currentPhase = phaseRef.current;
+
+    // Strategy 1: Find earliest matching key in buffer (allows out-of-order input)
+    const buffer = keyBufferRef.current;
+    
+    for (let i = 0; i < buffer.length; i++) {
+      if (buffer[i].key === expected) {
+        // Found matching key - consume it
+        buffer.splice(i, 1);
+
+        // Immediately advance state based on current phase
+        if (currentPhase.type === "click_letter") {
+          handleCorrectLetterClick(expected);
+        } else if (currentPhase.type === "type_prefix") {
+          handleCorrectType(expected);
+        }
+
+        // Continue processing buffer (recursive call)
+        // This allows rapid typing: d,o,g all processed immediately
+        processBuffer();
+        break;
+      }
+    }
+
+    // For wrong keys during click_letter or type_prefix: play wrong sound but don't consume from buffer
+    // (Strategy 1: defer wrong keys that might become correct later)
+    // Note: We don't actively check for wrong keys here - they just stay in buffer
+  }
+
+  // Advance to next state immediately (no delay)
+  function advanceToNextPhase() {
+    if (phase.type === "click_letter") {
+      if (phase.clickIndex === 0) {
+        setPhase({ type: "click_letter", clickIndex: 1 });
+        setTypedBuffer("");
+      } else if (phase.clickIndex === 1) {
+        setPhase({ type: "blend_prefix", k: 2 });
+        setTypedBuffer("");
+      } else if (phase.clickIndex === 2) {
+        setPhase({ type: "blend_prefix", k: 3 });
+        setTypedBuffer("");
+      }
+    }
+  }
+
+  // Handle correct letter click - immediate advancement
+  function handleCorrectLetterClick(ch: string) {
+    playSoundEffect("correct");
+    setAnnouncement("Correct");
+    setTimeout(() => setAnnouncement(""), 1000);
+
+    // Advance immediately (no delay)
+    advanceToNextPhase();
+    
+    // Trigger audio/visual feedback asynchronously (doesn't block input)
+    setTimeout(() => {
+      // This delay is only for UX feedback, not for blocking input
+    }, 100);
+  }
+
+  // Handle correct type - immediate advancement
+  function handleCorrectType(ch: string) {
+    playSoundEffect("correct");
+    setAnnouncement("Correct");
+    setTimeout(() => setAnnouncement(""), 1000);
+
+    // Use ref to get latest typed buffer value
+    const currentBuffer = typedBufferRef.current;
+    const nextBuffer = currentBuffer + ch;
+    setTypedBuffer(nextBuffer.toUpperCase());
+    
+    // Advance index immediately using callback to get latest value
+    setTypingCurrentIndex((currentIdx) => {
+      const nextIndex = currentIdx + 1;
+      const currentPhase = phaseRef.current;
+      
+      // Type guard: ensure we're in type_prefix phase
+      if (currentPhase.type === "type_prefix") {
+        if (nextIndex === currentPhase.k) {
+          // Typed prefix is complete - move to next phase immediately
+          if (currentPhase.k === 2) {
+            setPhase({ type: "click_letter", clickIndex: 2 });
+            setTypedBuffer("");
+            setTypingCurrentIndex(0);
+            setShowImage(false);
+          } else if (currentPhase.k === 3) {
+            setShowImage(false);
+            resetForNext();
+          }
+        }
+      }
+      
+      return nextIndex;
+    });
   }
 
   // Auto-pronounce and handle phase transitions
@@ -142,7 +324,16 @@ export default function WordsGame() {
     return () => clearBlendTimeouts();
   }, [phase, word, letters]);
 
-  // Physical keyboard for both clicking and typing
+  // Process buffer when state changes (allows queued keys to be consumed)
+  useEffect(() => {
+    // Process buffer after state settles (use setTimeout to avoid render cycle issues)
+    const timer = setTimeout(() => {
+      processBuffer();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [phase, typingCurrentIndex, word, letters, typedBuffer]);
+
+  // Physical keyboard handler - adds to buffer, processes immediately
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const ch = e.key.toUpperCase();
@@ -150,19 +341,39 @@ export default function WordsGame() {
       e.preventDefault();
       e.stopPropagation();
 
-      if (phase.type === "click_letter") {
-        handleLetterClick(ch);
-      } else if (phase.type === "type_prefix") {
-        handleType(ch);
+      // Only accept input during click_letter or type_prefix phases
+      // Use ref to get latest phase (avoids stale closure)
+      if (phaseRef.current.type === "blend_prefix") return;
+
+      const expected = getExpectedLetter();
+      
+      if (expected && ch === expected) {
+        // Correct key - add to buffer and process immediately
+        addToBuffer(ch);
+        processBuffer();
+      } else if (expected) {
+        // Wrong key - give immediate feedback but don't block
+        // For Strategy 1: still add to buffer (it might be correct later)
+        // But also give wrong feedback now
+        playSoundEffect("wrong");
+        setAnnouncement("Try again");
+        setTimeout(() => setAnnouncement(""), 1000);
+        
+        // Still add to buffer in case it becomes correct (e.g., typed O early, then D)
+        addToBuffer(ch);
+        // Don't process buffer here - let wrong keys stay until their turn
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [phase, typedBuffer, typingCurrentIndex, word, letters]);
+  }, []); // Empty deps - we use refs to get latest state
 
   // Reset for next word
   function resetForNext() {
     clearBlendTimeouts();
+    // Clear type-ahead buffer
+    keyBufferRef.current = [];
+    lastKeyRef.current = null;
     setWordIndex((i) => (i + 1) % WORDS.length);
     setPhase({ type: "click_letter", clickIndex: 0 });
     setTypedBuffer("");
@@ -178,85 +389,6 @@ export default function WordsGame() {
     return `${word.toLowerCase()}.png`;
   }, [word]);
 
-  // Handle letter click during click_letter phase
-  function handleLetterClick(ch: string) {
-    if (phase.type !== "click_letter") return;
-
-    const need = letters[phase.clickIndex];
-    if (ch !== need) {
-      playSoundEffect("wrong");
-      setAnnouncement("Try again");
-      setTimeout(() => setAnnouncement(""), 1000);
-      void playLetterSound(need);
-      return;
-    }
-
-    playSoundEffect("correct");
-    setAnnouncement("Correct");
-    setTimeout(() => setAnnouncement(""), 1000);
-
-    // After correct click, wait 1.5s before advancing
-    setTimeout(() => {
-      if (phase.clickIndex === 0) {
-        // First letter clicked → move to second letter click
-        setPhase({ type: "click_letter", clickIndex: 1 });
-        setTypedBuffer("");
-      } else if (phase.clickIndex === 1) {
-        // Second letter clicked → start blend_prefix(k=2)
-        setPhase({ type: "blend_prefix", k: 2 });
-        setTypedBuffer("");
-      } else if (phase.clickIndex === 2) {
-        // Third letter clicked → start blend_prefix(k=3)
-        setPhase({ type: "blend_prefix", k: 3 });
-        setTypedBuffer("");
-      }
-    }, 1500);
-  }
-
-  // Handle typing during type_prefix phase
-  function handleType(ch: string) {
-    if (phase.type !== "type_prefix") return;
-
-    const target = letters.slice(0, phase.k).join("").toUpperCase();
-    const expectedLetter = target[typingCurrentIndex];
-    const pressed = ch.toUpperCase();
-
-    if (pressed !== expectedLetter) {
-      // Wrong key
-      playSoundEffect("wrong");
-      setAnnouncement("Try again");
-      setTimeout(() => setAnnouncement(""), 1000);
-      return;
-    }
-
-    // Correct key
-    playSoundEffect("correct");
-    setAnnouncement("Correct");
-    setTimeout(() => setAnnouncement(""), 1000);
-
-    const nextBuffer = typedBuffer + ch;
-    setTypedBuffer(nextBuffer.toUpperCase());
-
-    // Wait 1.5s before advancing to next letter
-    setTimeout(() => {
-      setTypingCurrentIndex(typingCurrentIndex + 1);
-
-      if (typingCurrentIndex + 1 === phase.k) {
-        // Typed prefix is complete - move to next phase
-        if (phase.k === 2) {
-          // After typing 2-letter prefix → move to third letter click
-          setPhase({ type: "click_letter", clickIndex: 2 });
-          setTypedBuffer("");
-          setTypingCurrentIndex(0);
-          setShowImage(false);
-        } else if (phase.k === 3) {
-          // After typing full word → hide image and advance to next word
-          setShowImage(false);
-          resetForNext();
-        }
-      }
-    }, 1500);
-  }
 
   // Color logic per letter based on current phase
   const colorForIndex = (idx: number): string => {
