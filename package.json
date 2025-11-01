@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "audio:normalize": "node scripts/normalize-audio.mjs",
+    "audio:normalize:dry": "node scripts/normalize-audio.mjs --dry",
+    "audio:restore": "node scripts/normalize-audio.mjs --restore"
   },
   "dependencies": {
     "react": "^18.3.1",
