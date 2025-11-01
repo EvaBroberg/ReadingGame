@@ -16,6 +16,43 @@ function playClip(base: string): Promise<void> {
   });
 }
 
+// Play sound effect (correct/wrong) with m4a → mp3 fallback
+// Throttles to prevent overlapping by restarting if already playing
+let currentCorrectAudio: HTMLAudioElement | null = null;
+let currentWrongAudio: HTMLAudioElement | null = null;
+
+function playSoundEffect(kind: "correct" | "wrong"): void {
+  const current = kind === "correct" ? currentCorrectAudio : currentWrongAudio;
+  if (current) {
+    current.currentTime = 0;
+    current.play().catch(() => {});
+    return;
+  }
+
+  const tryExt = (exts: string[]): void => {
+    if (exts.length === 0) return;
+    const [ext, ...rest] = exts;
+    const el = new Audio(`/audio/sound_effects/${kind}.${ext}`);
+    el.onerror = () => tryExt(rest);
+    el.play().catch(() => tryExt(rest));
+    
+    if (kind === "correct") {
+      currentCorrectAudio = el;
+    } else {
+      currentWrongAudio = el;
+    }
+    
+    el.onended = () => {
+      if (kind === "correct") {
+        currentCorrectAudio = null;
+      } else {
+        currentWrongAudio = null;
+      }
+    };
+  };
+  tryExt(["m4a", "mp3"]);
+}
+
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
 type Word = "DOG" | "CAT";
 const WORDS: Word[] = ["DOG", "CAT"];
@@ -34,6 +71,9 @@ export default function WordsGame() {
   const [phase, setPhase] = useState<Phase>({ type: "click_letter", clickIndex: 0 });
   const [typedBuffer, setTypedBuffer] = useState<string>("");
   const [blendHighlightStep, setBlendHighlightStep] = useState<number>(0); // 0..k for blend_prefix
+  const [typingCurrentIndex, setTypingCurrentIndex] = useState<number>(0); // Current position in typing sequence
+  const [announcement, setAnnouncement] = useState<string>("");
+  const [showImage, setShowImage] = useState<boolean>(false);
 
   // Timeout refs for blend animation
   const blendTimeoutsRef = useRef<number[]>([]);
@@ -60,6 +100,11 @@ export default function WordsGame() {
       const prefix = letters.slice(0, phase.k).join("");
       void playClip(prefix);
 
+      // Show image when full word audio starts (k=3)
+      if (phase.k === 3) {
+        setShowImage(true);
+      }
+
       // Start staggered animation
       clearBlendTimeouts();
       setBlendHighlightStep(0);
@@ -78,6 +123,11 @@ export default function WordsGame() {
         setTimeout(() => {
           setPhase({ type: "type_prefix", k: phase.k });
           setTypedBuffer("");
+          setTypingCurrentIndex(0);
+          // Keep image visible during typing phase for full word (k=3)
+          if (phase.k !== 3) {
+            setShowImage(false);
+          }
         }, 100);
       }, phase.k * 1000);
       blendTimeoutsRef.current.push(redTimeoutId);
@@ -104,7 +154,7 @@ export default function WordsGame() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [phase, typedBuffer, word]);
+  }, [phase, typedBuffer, typingCurrentIndex, word, letters]);
 
   // Reset for next word
   function resetForNext() {
@@ -112,9 +162,17 @@ export default function WordsGame() {
     setWordIndex((i) => (i + 1) % WORDS.length);
     setPhase({ type: "click_letter", clickIndex: 0 });
     setTypedBuffer("");
+    setTypingCurrentIndex(0);
     setBlendHighlightStep(0);
     lastAutoRef.current = "";
+    setAnnouncement("");
+    setShowImage(false);
   }
+
+  // Get image filename for current word
+  const imageFilename = useMemo(() => {
+    return `${word.toLowerCase()}.png`;
+  }, [word]);
 
   // Handle letter click during click_letter phase
   function handleLetterClick(ch: string) {
@@ -122,27 +180,33 @@ export default function WordsGame() {
 
     const need = letters[phase.clickIndex];
     if (ch !== need) {
-      playFeedback("failure");
+      playSoundEffect("wrong");
+      setAnnouncement("Try again");
+      setTimeout(() => setAnnouncement(""), 1000);
       void playLetterSound(need);
       return;
     }
 
-    playFeedback("success");
+    playSoundEffect("correct");
+    setAnnouncement("Correct");
+    setTimeout(() => setAnnouncement(""), 1000);
 
-    // After correct click, advance logic
-    if (phase.clickIndex === 0) {
-      // First letter clicked → move to second letter click
-      setPhase({ type: "click_letter", clickIndex: 1 });
-      setTypedBuffer("");
-    } else if (phase.clickIndex === 1) {
-      // Second letter clicked → start blend_prefix(k=2)
-      setPhase({ type: "blend_prefix", k: 2 });
-      setTypedBuffer("");
-    } else if (phase.clickIndex === 2) {
-      // Third letter clicked → start blend_prefix(k=3)
-      setPhase({ type: "blend_prefix", k: 3 });
-      setTypedBuffer("");
-    }
+    // After correct click, wait 1.5s before advancing
+    setTimeout(() => {
+      if (phase.clickIndex === 0) {
+        // First letter clicked → move to second letter click
+        setPhase({ type: "click_letter", clickIndex: 1 });
+        setTypedBuffer("");
+      } else if (phase.clickIndex === 1) {
+        // Second letter clicked → start blend_prefix(k=2)
+        setPhase({ type: "blend_prefix", k: 2 });
+        setTypedBuffer("");
+      } else if (phase.clickIndex === 2) {
+        // Third letter clicked → start blend_prefix(k=3)
+        setPhase({ type: "blend_prefix", k: 3 });
+        setTypedBuffer("");
+      }
+    }, 1500);
   }
 
   // Handle typing during type_prefix phase
@@ -150,27 +214,44 @@ export default function WordsGame() {
     if (phase.type !== "type_prefix") return;
 
     const target = letters.slice(0, phase.k).join("").toUpperCase();
-    const next = (typedBuffer + ch).toUpperCase();
+    const expectedLetter = target[typingCurrentIndex];
+    const pressed = ch.toUpperCase();
 
-    if (!target.startsWith(next)) {
-      playFeedback("failure");
+    if (pressed !== expectedLetter) {
+      // Wrong key
+      playSoundEffect("wrong");
+      setAnnouncement("Try again");
+      setTimeout(() => setAnnouncement(""), 1000);
       return;
     }
 
-    setTypedBuffer(next);
-    playFeedback("success");
+    // Correct key
+    playSoundEffect("correct");
+    setAnnouncement("Correct");
+    setTimeout(() => setAnnouncement(""), 1000);
 
-    if (next === target) {
-      // Typed prefix is complete
-      if (phase.k === 2) {
-        // After typing 2-letter prefix → move to third letter click
-        setPhase({ type: "click_letter", clickIndex: 2 });
-        setTypedBuffer("");
-      } else if (phase.k === 3) {
-        // After typing full word → advance to next word
-        setTimeout(() => resetForNext(), 350);
+    const nextBuffer = typedBuffer + ch;
+    setTypedBuffer(nextBuffer.toUpperCase());
+
+    // Wait 1.5s before advancing to next letter
+    setTimeout(() => {
+      setTypingCurrentIndex(typingCurrentIndex + 1);
+
+      if (typingCurrentIndex + 1 === phase.k) {
+        // Typed prefix is complete - move to next phase
+        if (phase.k === 2) {
+          // After typing 2-letter prefix → move to third letter click
+          setPhase({ type: "click_letter", clickIndex: 2 });
+          setTypedBuffer("");
+          setTypingCurrentIndex(0);
+          setShowImage(false);
+        } else if (phase.k === 3) {
+          // After typing full word → hide image and advance to next word
+          setShowImage(false);
+          resetForNext();
+        }
       }
-    }
+    }, 1500);
   }
 
   // Color logic per letter based on current phase
@@ -193,10 +274,18 @@ export default function WordsGame() {
 
     if (phase.type === "type_prefix") {
       // During typing: first k letters are red, others gray
+      // The current target letter (typingCurrentIndex) should be more prominent
       return idx < phase.k ? "text-red-600" : "text-gray-300";
     }
 
     return "text-gray-300";
+  };
+
+  // Determine if a letter should pulsate (only during typing with 2+ letters total)
+  const shouldPulsate = (idx: number): boolean => {
+    if (phase.type !== "type_prefix") return false;
+    // Pulse the current target letter if we're typing 2+ letters total
+    return idx === typingCurrentIndex && phase.k >= 2;
   };
 
   // Get current target prefix for replay/display
@@ -211,14 +300,40 @@ export default function WordsGame() {
 
   return (
     <div className="flex flex-col items-center gap-6">
+      {/* Accessibility announcement */}
+      <div aria-live="polite" aria-atomic="true" className="sr-only">
+        {announcement}
+      </div>
+
       {/* Big word display */}
       <div className="flex gap-4 select-none">
-        {letters.map((L, idx) => (
-          <span key={idx} className={`text-7xl font-extrabold ${colorForIndex(idx)}`}>
-            {L}
-          </span>
-        ))}
+        {letters.map((L, idx) => {
+          const colorClass = colorForIndex(idx);
+          const pulseClass = shouldPulsate(idx) ? "animate-pulse-slow" : "";
+          const isTargetLetter = phase.type === "type_prefix" && idx === typingCurrentIndex;
+          const boldClass = isTargetLetter ? "font-black" : "font-extrabold";
+          
+          return (
+            <span
+              key={idx}
+              className={`text-7xl ${boldClass} ${colorClass} ${pulseClass}`}
+            >
+              {L}
+            </span>
+          );
+        })}
       </div>
+
+      {/* Word illustration - shown when full word audio plays */}
+      {showImage && (
+        <div className="flex justify-center">
+          <img
+            src={`/images/${imageFilename}`}
+            alt={word}
+            className="max-w-xs max-h-64 object-contain"
+          />
+        </div>
+      )}
 
       {/* Replay button */}
       <div className="flex gap-3">
@@ -241,9 +356,8 @@ export default function WordsGame() {
       {phase.type === "click_letter" && (
         <>
           <p className="text-gray-600">
-            Click: <span className="font-bold">{letters[phase.clickIndex]}</span>
+            Press: <span className="font-bold">{letters[phase.clickIndex]}</span>
           </p>
-          <AlphabetGrid onClick={handleLetterClick} />
         </>
       )}
 
@@ -254,45 +368,9 @@ export default function WordsGame() {
             Type: <span className="font-bold">{currentPrefix}</span>
           </p>
           <div className="text-3xl font-mono">{typedBuffer}</div>
-          <OnscreenKeyboard onPress={handleType} />
         </>
       )}
     </div>
   );
 }
 
-// Simple A–Z grid for clicking letters
-function AlphabetGrid({ onClick }: { onClick: (ch: string) => void }) {
-  return (
-    <div className="grid grid-cols-7 gap-2 max-w-[600px]">
-      {LETTERS.map((L) => (
-        <button
-          key={L}
-          onClick={() => onClick(L)}
-          className="px-3 py-2 text-xl rounded-lg bg-white border hover:bg-gray-100"
-          aria-label={`Letter ${L}`}
-        >
-          {L}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-// On-screen keyboard (A–Z) for typing
-function OnscreenKeyboard({ onPress }: { onPress: (ch: string) => void }) {
-  return (
-    <div className="grid grid-cols-7 gap-2 max-w-[600px]">
-      {LETTERS.map((L) => (
-        <button
-          key={L}
-          onClick={() => onPress(L)}
-          className="px-3 py-2 text-xl rounded-lg bg-white border hover:bg-gray-100"
-          aria-label={`Key ${L}`}
-        >
-          {L}
-        </button>
-      ))}
-    </div>
-  );
-}
