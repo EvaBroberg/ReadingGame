@@ -40,12 +40,70 @@ function resolveUrl(base: string): string | null {
   return null; // forces TTS
 }
 
+// --- Web Audio API setup for volume boost ---
+let audioContext: AudioContext | null = null;
+let letterGainNode: GainNode | null = null;
+let feedbackGainNode: GainNode | null = null;
+const mediaSources = new WeakMap<HTMLAudioElement, MediaElementAudioSourceNode>();
+
+function initWebAudio() {
+  if (audioContext) return audioContext;
+  
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return null;
+    
+    audioContext = new AudioCtx();
+    letterGainNode = audioContext.createGain();
+    feedbackGainNode = audioContext.createGain();
+    
+    // Boost letters to 1.5x (50% louder), keep feedback at 0.75
+    letterGainNode.gain.value = 1.5;
+    feedbackGainNode.gain.value = 0.75;
+    
+    letterGainNode.connect(audioContext.destination);
+    feedbackGainNode.connect(audioContext.destination);
+    
+    return audioContext;
+  } catch {
+    return null;
+  }
+}
+
+async function resumeAudioContext(): Promise<void> {
+  if (audioContext && audioContext.state === "suspended") {
+    try {
+      await audioContext.resume();
+    } catch {
+      // Ignore resume errors
+    }
+  }
+}
+
+function getOrCreateMediaSource(el: HTMLAudioElement, gainNode: GainNode): MediaElementAudioSourceNode | null {
+  const ctx = audioContext;
+  if (!ctx || ctx.state === "closed") return null;
+  
+  let source = mediaSources.get(el);
+  if (!source) {
+    try {
+      source = ctx.createMediaElementSource(el);
+      source.connect(gainNode);
+      mediaSources.set(el, source);
+    } catch {
+      return null;
+    }
+  }
+  return source;
+}
+
 // --- Cache & preload ---
 const cache: Record<string, HTMLAudioElement | null> = {};
 let didPreload = false;
 
 export function preloadLetterSounds() {
   if (didPreload) return;
+  initWebAudio(); // Initialize Web Audio if available
   const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
   for (const L of letters) {
     const url = resolveUrl(L);
@@ -68,7 +126,7 @@ export function preloadLetterSounds() {
 
 // Volume settings for balance adjustment
 const VOLUMES = {
-  letter: 1.0,      // Letters at full volume
+  letter: 1.0,      // Letters at full volume (HTMLAudioElement fallback)
   feedback: 0.75,   // SFX quieter to not overpower letters
 };
 
@@ -76,17 +134,42 @@ export function playLetterSound(letter: string): Promise<void> {
   const L = letter.toUpperCase();
   const el = cache[L];
   return new Promise((resolve) => {
-    if (el) {
-      try {
-        el.currentTime = 0;
-        el.volume = VOLUMES.letter;
-        el.onended = () => resolve();
-        void el.play().catch(() => { ttsLetter(L); resolve(); });
-      } catch {
-        ttsLetter(L); resolve();
+    if (!el) {
+      ttsLetter(L);
+      resolve();
+      return;
+    }
+    
+    // Try Web Audio API for boosted volume
+    const ctx = initWebAudio();
+    if (ctx && letterGainNode && ctx.state !== "closed") {
+      void resumeAudioContext(); // Resume if suspended
+      const source = getOrCreateMediaSource(el, letterGainNode);
+      if (source) {
+        try {
+          el.currentTime = 0;
+          el.onended = () => resolve();
+          void el.play().catch(() => {
+            // Fallback to HTMLAudioElement if Web Audio fails
+            el.volume = VOLUMES.letter;
+            void el.play().catch(() => { ttsLetter(L); resolve(); });
+          });
+          return;
+        } catch {
+          // Fall through to HTMLAudioElement fallback
+        }
       }
-    } else {
-      ttsLetter(L); resolve();
+    }
+    
+    // Fallback to HTMLAudioElement
+    try {
+      el.currentTime = 0;
+      el.volume = VOLUMES.letter;
+      el.onended = () => resolve();
+      void el.play().catch(() => { ttsLetter(L); resolve(); });
+    } catch {
+      ttsLetter(L);
+      resolve();
     }
   });
 }
@@ -94,6 +177,24 @@ export function playLetterSound(letter: string): Promise<void> {
 export function playFeedback(kind: "success" | "failure") {
   const el = cache[kind];
   if (!el) return;
+  
+  // Try Web Audio API
+  const ctx = initWebAudio();
+  if (ctx && feedbackGainNode && ctx.state !== "closed") {
+    void resumeAudioContext(); // Resume if suspended
+    const source = getOrCreateMediaSource(el, feedbackGainNode);
+    if (source) {
+      try {
+        el.currentTime = 0;
+        void el.play();
+        return;
+      } catch {
+        // Fall through to HTMLAudioElement fallback
+      }
+    }
+  }
+  
+  // Fallback to HTMLAudioElement
   try {
     el.currentTime = 0;
     el.volume = VOLUMES.feedback;
