@@ -2,7 +2,7 @@
 /**
  * Audio Normalization Tool
  * 
- * Normalizes all audio files in public/audio/sound_effects to consistent loudness.
+ * Normalizes all audio files in public/audio (including subdirectories) to consistent loudness.
  * Uses ffmpeg's loudnorm filter with two-pass processing for accuracy.
  * 
  * Usage:
@@ -21,7 +21,7 @@ import { createWriteStream } from 'fs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const projectRoot = join(__dirname, '..');
-const audioDir = join(projectRoot, 'public', 'audio', 'sound_effects');
+const audioDir = join(projectRoot, 'public', 'audio');
 const manifestPath = join(audioDir, '.normalize-manifest.json');
 
 // Target loudness: -14 LUFS, true peak ≤ -1.5 dBTP, LRA ≈ 11
@@ -470,7 +470,7 @@ The tool will:
   
   const files = await findAudioFiles(audioDir);
   if (files.length === 0) {
-    log(colors.yellow, 'No audio files found in public/audio/sound_effects');
+    log(colors.yellow, 'No audio files found in public/audio');
     process.exit(0);
   }
   
