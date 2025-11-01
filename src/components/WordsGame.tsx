@@ -18,7 +18,7 @@ function playClip(base: string): Promise<void> {
 
 // Play sound effect (correct/wrong) with m4a → mp3 fallback
 // Throttles to prevent overlapping by restarting if already playing
-const SOUND_EFFECT_VOLUME = 0.8; // SFX slightly quieter to not overpower letters
+const SOUND_EFFECT_VOLUME = 0.75; // SFX quieter to not overpower letters
 
 let currentCorrectAudio: HTMLAudioElement | null = null;
 let currentWrongAudio: HTMLAudioElement | null = null;

@@ -69,7 +69,7 @@ export function preloadLetterSounds() {
 // Volume settings for balance adjustment
 const VOLUMES = {
   letter: 1.0,      // Letters at full volume
-  feedback: 0.8,   // SFX slightly quieter to not overpower
+  feedback: 0.75,   // SFX quieter to not overpower letters
 };
 
 export function playLetterSound(letter: string): Promise<void> {
